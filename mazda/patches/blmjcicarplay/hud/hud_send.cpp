@@ -558,7 +558,7 @@ bool send_one(const NaviSnapshot &cur,
         disp.distanceUnit      = cur.distance_unit ? cur.distance_unit
                                                    : static_cast<uint8_t>(1);
         disp.displaySpeedLimit = splim;                                // [VN-PATCH] km/h
-        disp.displaySpeedUnit  = static_cast<uint8_t>(splim ? 1 : 0);  // [VN-PATCH] 1=km/h, 0=none
+        disp.displaySpeedUnit  = static_cast<uint8_t>(splim ? 2 : 0);  // [EU FIX] VBS enum 2=km/h (was 1=mph which mis-renders as ~80 for a 50 km/h sign on EU HUD)
         disp.text_ID3          = sync_bit;
     }
 
