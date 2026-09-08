@@ -407,7 +407,11 @@ static uint16_t read_splim()
     std::fclose(f);
     if (n < 2) return 0;
     long now = static_cast<long>(std::time(nullptr));
-    if (now - ts > 8 || limit < 5 || limit > 200) return 0;   // stale or implausible
+    // Reject future-dated ts (a splim file that survived a reboot on a CMU
+    // whose RTC has reset to 1970-01-01: the old-session ts is now "in the
+    // future" and the plain `now - ts > 8` check would treat it as fresh
+    // forever, latching whatever value was in the file).
+    if (ts > now + 2 || now - ts > 8 || limit < 5 || limit > 200) return 0;
     return static_cast<uint16_t>(limit);
 #endif
 }
