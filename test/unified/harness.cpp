@@ -10,6 +10,8 @@
 //
 //   ./harness coop     merge shim present (OEM speed shared, OEM frames muted)
 //   ./harness legacy   no merge shim; legacy /data_persist/splim reader
+//   ./harness street   force_street_name(+_native) = true in libpatch.conf
+//   ./harness street_off   same frames, both keys false (stock blanking kept)
 
 #include <dlfcn.h>
 #include <stdint.h>
@@ -90,6 +92,56 @@ static Stats stats_since(int from)
         }
     }
     return s;
+}
+
+static void (*g_set_oem_street)(const char *) = nullptr;
+
+// Street of the last OEM-sourced Msg2 (i.e. what svcjcinavi let reach the HUD).
+static bool last_oem_street(int from, char *out, size_t n)
+{
+    Rec r; bool found = false;
+    for (int i = from; fake_get(i, &r); ++i)
+        if (r.kind == K_MSG2 && r.src == SRC_OEM) { snprintf(out, n, "%s", r.street); found = true; }
+    return found;
+}
+
+// svcjcinavi has stored `received` in current_StreetName but, EU-style,
+// blanked the outbound strip to " ".
+static void oem_frame_eu(uint32_t man, uint16_t speed, const char *received)
+{
+    g_set_oem_street(received);
+    oem_frame(man, speed, 3, " ");
+}
+
+static int street(bool on)
+{
+    char got[64];
+    printf("[S1] stock-nav route frame, EU-blanked strip\n");
+    int mark = fake_count();
+    oem_frame_eu(3, 50, "Oboronna vulytsia");
+    last_oem_street(mark, got, sizeof(got));
+    if (on) CHECK(strcmp(got, "Oboronna vulytsia") == 0, "native street un-blanked (\"%s\")", got);
+    else    CHECK(strcmp(got, " ") == 0, "stock blanking kept with the keys off (\"%s\")", got);
+
+    printf("[S2] stock-nav speed-only frame (no route)\n");
+    mark = fake_count();
+    oem_frame_eu(0, 50, "Oboronna vulytsia");
+    last_oem_street(mark, got, sizeof(got));
+    CHECK(strcmp(got, " ") == 0, "no stale street without a maneuver (\"%s\")", got);
+
+    printf("[S3] Android Auto frame + OEM-cadence frame\n");
+    mark = fake_count();
+    g_set_oem_street("Hrushevskoho");
+    aa_frame(5, " ");                       // EU-blanked AA strip
+    last_oem_street(mark, got, sizeof(got));
+    if (on) CHECK(strcmp(got, "Hrushevskoho") == 0, "AA street un-blanked (\"%s\")", got);
+    else    CHECK(strcmp(got, " ") == 0, "AA street stays blank with the keys off (\"%s\")", got);
+    mark = fake_count();
+    oem_frame_eu(0, 60, "");
+    last_oem_street(mark, got, sizeof(got));
+    if (on) CHECK(strcmp(got, "Hrushevskoho") == 0, "OEM-cadence frame repeats AA street (\"%s\")", got);
+    aa_frame(0, "");
+    return g_fail;
 }
 
 static bool file_exists(const char *p) { return access(p, F_OK) == 0; }
@@ -271,12 +323,17 @@ int main(int argc, char **argv)
 {
     fake_set_main_thread();
     // The merge shim self-gates on svcjcinavi.so being mapped in-process.
-    if (!dlopen("/jci/navi/svcjcinavi.so", RTLD_NOW | RTLD_GLOBAL)) {
+    void *nav = dlopen("/jci/navi/svcjcinavi.so", RTLD_NOW | RTLD_GLOBAL);
+    if (!nav) {
         fprintf(stderr, "dlopen fake svcjcinavi failed: %s\n", dlerror());
         return 2;
     }
+    g_set_oem_street = reinterpret_cast<void (*)(const char *)>(dlsym(nav, "fake_set_street"));
     const char *mode = argc > 1 ? argv[1] : "coop";
-    int fails = strcmp(mode, "legacy") == 0 ? legacy() : coop();
+    int fails = strcmp(mode, "legacy") == 0     ? legacy()
+              : strcmp(mode, "street") == 0     ? street(true)
+              : strcmp(mode, "street_off") == 0 ? street(false)
+              : coop();
     printf(fails ? "\n%s: %d FAILED\n" : "\n%s: all passed\n", mode, fails);
     return fails ? 1 : 0;
 }

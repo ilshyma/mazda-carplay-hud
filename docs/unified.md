@@ -40,6 +40,29 @@ This replaces the earlier `splim_bridge` / `splim_udpd` shell daemon
 (dbus-monitor -> `/data_persist/splim`). The install removes it. If the
 svcjcinavi shim is absent, the CarPlay shim still reads `/data_persist/splim`.
 
+## Street name on EU units
+
+On EU firmware svcjcinavi replaces the street line with a single space before
+it reaches the HUD. A capture from a CX-9 EU shows NNG sending the street in
+`GuidanceChangedForHUD` while every `SetHUD_Display_Msg2` carried `" "`. Two
+keys undo that in the svcjcinavi shim: it re-points the strip at the street
+svcjcinavi received (`current_StreetName`):
+
+- `force_street_name`: Android Auto frames (upstream oem-aa-mod key)
+- `force_street_name_native`: the stock nav's own route frames. Frames
+  without a maneuver keep the blank, so no stale street lingers off-route.
+
+CarPlay does not go through svcjcinavi, so the EU blanking never applies to
+it. Its street is whatever iOS sends: the maneuver's road name, else the
+maneuver text. Waze has been seen sending neither. The debug package shows
+what the phone sends:
+
+```sh
+tools/docker-build.sh release blmjcicarplay-debug && tools/package.sh debug
+HUD_PKG=dist/hud-mod-debug tools/deploy.sh install
+tools/deploy.sh roads        # live: decoded maneuvers + road="..." per pick
+```
+
 ## Build
 
 ```sh

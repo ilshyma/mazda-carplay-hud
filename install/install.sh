@@ -54,7 +54,7 @@ NAV_MD5=$(md5sum /jci/navi/svcjcinavi.so 2>/dev/null | cut -d' ' -f1)
 if [ -z "$NAV_MD5" ]; then
   log "WARNING: /jci/navi/svcjcinavi.so not found — no stock nav: no speed limit, CarPlay/AA arrows only"
 elif [ "$NAV_MD5" != "$SVCNAVI_MD5" ]; then
-  log "WARNING: svcjcinavi.so md5 $NAV_MD5 is not the known 74.00.324A build; force_street_name will be disabled"
+  log "WARNING: svcjcinavi.so md5 $NAV_MD5 is not the known 74.00.324A build; force_street_name(_native) will be disabled"
 fi
 pidof NNG >/dev/null 2>&1 || ps | grep -q '[j]ci-linux_imx6' || \
   log "NOTE: NNG (nav SD card engine) not running right now — speed limit needs the nav SD card"
@@ -92,7 +92,8 @@ else
   cp -f "$SRC/libpatch.conf" "$MOD_DIR/libpatch.conf"
 fi
 if [ -n "$NAV_MD5" ] && [ "$NAV_MD5" != "$SVCNAVI_MD5" ]; then
-  sed -i 's/^[[:space:]]*force_street_name[[:space:]]*=.*/force_street_name = false/' "$MOD_DIR/libpatch.conf"
+  sed -i -e 's/^[[:space:]]*force_street_name[[:space:]]*=.*/force_street_name = false/' \
+         -e 's/^[[:space:]]*force_street_name_native[[:space:]]*=.*/force_street_name_native = false/' "$MOD_DIR/libpatch.conf"
 fi
 log "installed shims + libpatch.conf in $MOD_DIR"
 
@@ -174,5 +175,5 @@ for s in jciCARPLAY jciAAPA jcinavi aap_service; do
   log "  $s: $(echo "$line" | grep -oE 'libpatch-[a-z_]+\.so' || echo MISSING)"
 done
 log "  NaviSupported=$(grep -oE '<name>NaviSupported</name><value>[A-Z]+' "$MASTER" 2>/dev/null | grep -oE '[A-Z]+$')"
-log "  config: $(grep -E '^(hud_transport|force_street_name|use_protocol_v1_6)' "$MOD_DIR/libpatch.conf" | tr '\n' ' ')"
+log "  config: $(grep -E '^(hud_transport|force_street_name|force_street_name_native|use_protocol_v1_6)' "$MOD_DIR/libpatch.conf" | tr '\n' ' ')"
 log "DONE. Reboot the unit to load the shims."

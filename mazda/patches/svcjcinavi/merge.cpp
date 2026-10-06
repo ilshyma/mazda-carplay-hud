@@ -164,6 +164,11 @@ Msg2Fn g_real_msg2  = nullptr;
 // Msg2 hook falls back to the (possibly blanked) strip pointer.
 const char *g_cur_street = nullptr;
 
+// Which flows read g_cur_street: force_street_name (AAP frames) and
+// force_street_name_native (the stock nav's own route frames).
+bool g_unblank_aap    = false;
+bool g_unblank_native = false;
+
 // Merge state — all accessed only from svcjcinavi's single sender
 // thread (thUpdateGuidanceChangeToHUD), so plain variables are safe.
 bool     g_have_aap   = false;
@@ -182,8 +187,11 @@ time_t   g_aap_last   = 0;
 //   PASSTHROUGH — AAP idle (or the AAP blanking frame): pass untouched.
 //   DROP    — OEM-origin strip while CarPlay owns the HUD: swallow it,
 //             like the maneuver frame it belongs to.
+//   UNBLANK — OEM-origin strip of a native route frame (maneuver != 0)
+//             with no projection active and force_street_name_native:
+//             re-point it at the street svcjcinavi received.
 enum StreetAction { STREET_PASSTHROUGH, STREET_CAPTURE, STREET_REPLACE,
-                    STREET_DROP };
+                    STREET_DROP, STREET_UNBLANK };
 StreetAction g_street_action = STREET_PASSTHROUGH;
 
 // Captured AAP street name (from the AAP-origin Msg2). The real setter
@@ -192,6 +200,9 @@ StreetAction g_street_action = STREET_PASSTHROUGH;
 // street" request) is stored as the empty string, which the OEM setter
 // marshals as a blank street line.
 char g_aap_street[128] = { 0 };
+
+// Copy of current_StreetName for a native route strip (STREET_UNBLANK).
+char g_native_street[128] = { 0 };
 
 // Last OEM speed seen. Initialised to 0 — the value OEM nav itself
 // sends when there is no speed limit — so AAP frames carry a "no speed
@@ -240,13 +251,15 @@ void ensure_gate()
     g_enabled = (h != nullptr);
     if (g_enabled) {
         // Resolve the OEM's un-blanked street buffer (current_StreetName)
-        // ONLY when force_street_name is set. Left null, the Msg2 hook
+        // ONLY when force_street_name or force_street_name_native is set. Left null, the Msg2 hook
         // captures from the strip pointer (native OEM behaviour: markets
         // that blank the street keep blanking it). Load bias =
         // runtime(anchor) - file_offset(anchor); the library stays mapped
         // for the PID's lifetime, so the dlclose below only drops our
         // extra NOLOAD refcount — the computed address stays valid.
-        if (libpatch_config::force_street_name()) {
+        g_unblank_aap    = libpatch_config::force_street_name();
+        g_unblank_native = libpatch_config::force_street_name_native();
+        if (g_unblank_aap || g_unblank_native) {
             void *anchor = dlsym(h, kAnchorSym);
             if (anchor != nullptr) {
                 uintptr_t base =
@@ -263,8 +276,8 @@ void ensure_gate()
                      kAnchorSym);
             }
         } else {
-            LOGD("force_street_name=false — leaving OEM street handling "
-                 "intact (strip)");
+            LOGD("force_street_name(_native)=false — leaving OEM street "
+                 "handling intact (strip)");
         }
         // We only need the boolean "is it mapped" plus the anchor; drop
         // the extra refcount RTLD_NOLOAD took so we don't leak it.
@@ -385,6 +398,15 @@ int VBS_NAVI_SetHUDDisplayMsgReq(void *conn, VbsNaviHudDisplay *disp,
             LOGV("OEM frame: speed=0x%x unit=%u  spliced AAP man=%u dist=%u",
                  static_cast<unsigned>(g_oem_speed), static_cast<unsigned>(g_oem_sunit),
                  static_cast<unsigned>(g_aap_man), static_cast<unsigned>(g_aap_dist));
+        } else if (g_unblank_native && g_cur_street != nullptr &&
+                   disp->nextManeuverInfo != 0) {
+            // Stock-nav route frame: let its street through even where the
+            // market blanks it. Speed-only frames (no maneuver) keep the
+            // OEM's blank strip, so no stale street lingers off-route.
+            g_street_action = STREET_UNBLANK;
+            LOGV("OEM frame (AAP idle): man=%u speed=0x%x — native street un-blank",
+                 static_cast<unsigned>(disp->nextManeuverInfo),
+                 static_cast<unsigned>(g_oem_speed));
         } else {
             g_street_action = STREET_PASSTHROUGH;
             LOGV("OEM frame (AAP idle): speed=0x%x unit=%u — passthrough",
@@ -425,8 +447,8 @@ int VBS_NAVI_TMC_SetHUD_Display_Msg2(void *conn, VbsNaviHudMsg2 *msg2,
         // guards current_StreetName, so the read is consistent with the
         // frame being sent. Fall back to the strip pointer if the anchor
         // didn't resolve. A null/empty street is stored as "".
-        const char *src =
-            g_cur_street ? g_cur_street : msg2->guidancePointName;
+        const char *src = (g_unblank_aap && g_cur_street)
+                              ? g_cur_street : msg2->guidancePointName;
         libpatch::copy_utf8_truncated(g_aap_street, sizeof(g_aap_street), src);
         // Re-point this AAP-origin strip at our captured copy so the AAP
         // frame itself shows the real street rather than the market
@@ -434,10 +456,20 @@ int VBS_NAVI_TMC_SetHUD_Display_Msg2(void *conn, VbsNaviHudMsg2 *msg2,
         // cadences stay flicker-free.
         msg2->guidancePointName = g_aap_street;
         LOGV("Msg2 capture: AAP street \"%s\"%s", g_aap_street,
-             g_cur_street ? " (current_StreetName)" : " (strip)");
+             (g_unblank_aap && g_cur_street) ? " (current_StreetName)" : " (strip)");
     } else if (g_street_action == STREET_REPLACE) {
         msg2->guidancePointName = g_aap_street;
         LOGV("Msg2 replace: OEM strip -> AAP street \"%s\"", g_aap_street);
+    } else if (g_street_action == STREET_UNBLANK) {
+        // Same consistency argument as CAPTURE: we run on the sender thread
+        // under the guidance mutex that guards current_StreetName. An empty
+        // street stays the OEM strip (the HUD draws garbage for "").
+        libpatch::copy_utf8_truncated(g_native_street, sizeof(g_native_street),
+                                      g_cur_street);
+        if (g_native_street[0] != '\0') {
+            msg2->guidancePointName = g_native_street;
+        }
+        LOGV("Msg2 un-blank: native street \"%s\"", g_native_street);
     } else if (g_street_action == STREET_DROP) {
         g_street_action = STREET_PASSTHROUGH;
         LOGV("Msg2 drop: OEM strip (CarPlay owns HUD)");

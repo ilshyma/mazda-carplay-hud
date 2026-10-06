@@ -6,6 +6,9 @@
 #   tools/deploy.sh uninstall   run uninstall.sh, reboot
 #   tools/deploy.sh status      what is loaded where + live hand-off state
 #
+#   tools/deploy.sh roads       follow CarPlay road names live (debug CarPlay build)
+#
+# HUD_PKG  package folder to install (default dist/hud-mod; e.g. dist/hud-mod-debug)
 # CMU_KEY  ssh key for the cmu account (default: the toolkit's id_rsa_cmu)
 # CMU      user@host  (default cmu@192.168.53.1, the unit's Wi-Fi AP)
 set -eu
@@ -13,7 +16,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 KEY=${CMU_KEY:-$HOME/Documents/mazda-hud-install/mazda-hud-toolkit/id_rsa_cmu}
 CMU=${CMU:-cmu@192.168.53.1}
 PORT=36000
-PKG=$ROOT/dist/hud-mod
+PKG=${HUD_PKG:-$ROOT/dist/hud-mod}
 [ -f "$KEY" ] || { echo "ssh key not found: $KEY (set CMU_KEY)"; exit 1; }
 chmod 600 "$KEY" 2>/dev/null || true
 OPTS="-i $KEY -o PubkeyAcceptedAlgorithms=+ssh-rsa -o StrictHostKeyChecking=no -o ConnectTimeout=15"
@@ -60,6 +63,11 @@ echo "--- /tmp/carplay_bridge.log (tail)"
 tail -n 15 /tmp/carplay_bridge.log 2>/dev/null
 REMOTE
     ;;
+roads)
+    # Debug CarPlay build only: decoded maneuvers + the street sent to the HUD.
+    # busybox grep has no --line-buffered; awk fflush keeps it live over ssh.
+    ssh_cmu "tail -f /tmp/carplay_bridge.log | awk '/nav HUD|road=/ { print; fflush() }'"
+    ;;
 *)
-    sed -n '2,12p' "$0"; exit 1 ;;
+    sed -n '2,16p' "$0"; exit 1 ;;
 esac

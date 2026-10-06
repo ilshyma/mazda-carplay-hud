@@ -21,6 +21,8 @@
 //   hud_transport = svcnavi|vbs       which HUD backend to use          (default svcnavi)
 //   force_street_name = true|false    rewrite the HUD street strip with the AAP
 //                                     street even where the OEM blanks it (default false)
+//   force_street_name_native = true|false  same un-blanking for the stock nav's own
+//                                     route guidance (svcjcinavi shim) (default false)
 //   hud_fold_latin = true|false       fold HUD-unrenderable precomposed Latin
 //                                     street-name letters to their base forms (default true)
 //   hud_maneuver_max_distance_m = N   hide AA maneuver/street/distance/lanes until the
@@ -283,6 +285,7 @@ struct Settings {
     bool         hud               = true;
     HudTransport hud_transport     = HUD_TRANSPORT_SVCNAVI;
     bool         force_street_name = false;
+    bool         force_street_name_native = false;
     bool         hud_fold_latin    = true;
     uint32_t     hud_maneuver_max_distance_m = 0;
     bool         use_protocol_v1_6 = false;
@@ -330,6 +333,8 @@ inline void apply_kv(const char *key, const char *val, void *ud)
         }
     } else if (strcasecmp(key, "force_street_name") == 0) {
         s.force_street_name = parse_bool(val, s.force_street_name);
+    } else if (strcasecmp(key, "force_street_name_native") == 0) {
+        s.force_street_name_native = parse_bool(val, s.force_street_name_native);
     } else if (strcasecmp(key, "hud_fold_latin") == 0) {
         s.hud_fold_latin = parse_bool(val, s.hud_fold_latin);
     } else if (strcasecmp(key, "hud_maneuver_max_distance_m") == 0) {
@@ -363,6 +368,7 @@ inline void log_effective(const char *prefix)
 {
     const Settings &s = settings();
     LOGD("config: %s touch=%s hud=%s hud_transport=%s force_street_name=%s "
+            "force_street_name_native=%s "
             "hud_fold_latin=%s hud_maneuver_max_distance_m=%u "
             "use_protocol_v1_6=%s aa_audio_low_latency=%s "
             "mute_pauses_phone=%s "
@@ -374,6 +380,7 @@ inline void log_effective(const char *prefix)
          s.hud   ? "true" : "false",
          transport_name(s.hud_transport),
          s.force_street_name ? "true" : "false",
+         s.force_street_name_native ? "true" : "false",
          s.hud_fold_latin ? "true" : "false",
          static_cast<unsigned>(s.hud_maneuver_max_distance_m),
          s.use_protocol_v1_6 ? "true" : "false",
@@ -422,6 +429,7 @@ inline bool         touch_enabled()  { return settings().touch; }
 inline bool         hud_enabled()    { return settings().hud; }
 inline HudTransport hud_transport()  { return settings().hud_transport; }
 inline bool         force_street_name() { return settings().force_street_name; }
+inline bool         force_street_name_native() { return settings().force_street_name_native; }
 inline bool         hud_fold_latin() { return settings().hud_fold_latin; }
 inline uint32_t     hud_maneuver_max_distance_m() { return settings().hud_maneuver_max_distance_m; }
 inline bool         use_protocol_v1_6() { return settings().use_protocol_v1_6; }
