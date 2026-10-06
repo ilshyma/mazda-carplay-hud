@@ -21,3 +21,13 @@ AGPL-3.0 is copyleft: any derivative work must also be licensed
 under AGPL-3.0 (or a later compatible version), and the corresponding
 source must be made available to users who interact with the software
 over a network. Keeping this repository public satisfies that.
+
+## mazda-carplay-hud — by KID MIXER-MODER, EU fixes by ilshyma
+
+* Upstream:  https://github.com/KidMixer/mazda-carplay-hud (v2.0.0),
+             via https://github.com/ilshyma/mazda-carplay-hud (eu-fix)
+* License:   GNU Affero General Public License v3.0
+
+`mazda/patches/blmjcicarplay/` (the CarPlay iAP2 -> HUD shim) was
+imported from that project and adapted to take its speed limit from
+the svcjcinavi shim (`mazda/patches/common/hud_share.h`).
