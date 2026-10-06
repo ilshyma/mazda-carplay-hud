@@ -39,6 +39,7 @@
 #include "../patch.h"
 #include "hud_send.h"
 #include "../oem/libjcivbsnaviclient.h"   // OEM transport (libjcidbus + VBS_NAVI_*)
+#include "common/hud_share.h"              // OEM speed + CarPlay-active hand-off with the svcjcinavi shim
 
 #include <cstring>
 #include <atomic>
@@ -346,6 +347,10 @@ std::atomic<bool>       g_have_guidance{false}; // [KEEPALIVE] route active -> r
 std::atomic<long>       g_last_nav{0};          // [NAV-END] unix sec of last nav msg; sender clears HUD if stale
 std::atomic<bool>       g_clear_req{false};     // [NAV-END] in-app nav-off (TBT off, CarPlay still connected) -> blank maneuver, KEEP sign
 std::atomic<bool>       g_fullclear_req{false}; // [NAV-END] session gone / phone unplugged (cp_deactive_cb) -> FULL wipe incl sign
+std::atomic<bool>       g_yield_req{false};     // [UNIFIED] native nav took TBT (entity=NATIVE) -> hand HUD back, stay quiet
+std::atomic<bool>       g_cp_session{true};     // [UNIFIED] legacy mode: false after session-gone / native-yield until the next
+                                                //   CarPlay maneuver; gates the speed-only keepalive so a disconnected CarPlay
+                                                //   shim stops repainting the HUD under Android Auto / stock nav
 
 // === OEM connection state =====================================
 //
@@ -389,31 +394,50 @@ extern "C" void hud_status_cb(void *conn, unsigned char status, void *user)
          static_cast<unsigned>(status), absent ? "no HUD" : "HUD present");
 }
 
-// [VN-PATCH] Speed limit OCR'd from the VietMap badge by the on-CMU Lua
-// daemon (splim.lua), which writes "<limit> <unixtime>" to /data_persist/splim
-// on each confident read. Returns km/h, or 0 if missing / stale / implausible.
-static uint16_t read_splim()
+// Speed limit to paint into our frames.
+//   coop=true  — the svcjcinavi merge shim is running and publishes the OEM
+//                nav's own HUD speed (common/hud_share.h). limit/unit are the
+//                OEM's values verbatim (0/0 = no limit), so the sign matches
+//                what stock navigation shows, unit included. In this mode the
+//                OEM owns the HUD whenever CarPlay has no route (see sender_main).
+//   coop=false — legacy: "<limit> <unixtime>" in /data_persist/splim from the
+//                splim_bridge daemon (or nothing). unit is VBS 2 = km/h.
+struct SplimReading {
+    uint16_t limit;
+    uint8_t  unit;
+    bool     coop;
+};
+
+static SplimReading read_splim()
 {
-#ifdef CARPLAY_NO_SPLIM
-    // [VARIANT] "Touch + HUD (no speed-limit)" build: never read or show a posted
-    // limit (HUD shows maneuver+distance+road-name only). The keep-alive ticker still
-    // runs (it drives the ~2Hz maneuver re-assert), it just has no limit to poll.
-    return 0;
-#else
+    SplimReading r = { 0, 0, false };
+#ifndef CARPLAY_NO_SPLIM
+    if (hud_share::read_oem_speed(&r.limit, &r.unit)) {
+        r.coop = true;
+        return r;
+    }
     FILE *f = std::fopen("/data_persist/splim", "r");
-    if (!f) return 0;
+    if (!f) return r;
     int limit = 0; long ts = 0;
     int n = std::fscanf(f, "%d %ld", &limit, &ts);
     std::fclose(f);
-    if (n < 2) return 0;
+    if (n < 2) return r;
     long now = static_cast<long>(std::time(nullptr));
     // Reject future-dated ts (a splim file that survived a reboot on a CMU
     // whose RTC has reset to 1970-01-01: the old-session ts is now "in the
     // future" and the plain `now - ts > 8` check would treat it as fresh
     // forever, latching whatever value was in the file).
-    if (ts > now + 2 || now - ts > 8 || limit < 5 || limit > 200) return 0;
-    return static_cast<uint16_t>(limit);
+    if (ts > now + 2 || now - ts > 8 || limit < 5 || limit > 200) return r;
+    r.limit = static_cast<uint16_t>(limit);
+    r.unit  = 2;   // [EU FIX] VBS enum 2=km/h (1=mph mis-renders a 50 km/h sign as ~80 on EU HUDs)
 #endif
+    return r;
+}
+
+// Change-detection key for a reading (limit + unit).
+static inline uint32_t splim_key(const SplimReading &r)
+{
+    return static_cast<uint32_t>(r.limit) | (static_cast<uint32_t>(r.unit) << 16);
 }
 
 // [OVERSPEED] Read the over-speed flag written by carspeed_d — a SEPARATE process
@@ -442,6 +466,7 @@ bool send_one(const NaviSnapshot &cur,
               const NaviSnapshot &prev,
               uint8_t            &sync_bit,
               uint16_t            splim,
+              uint8_t             splim_unit,
               bool                splim_changed,
               bool                force)
 {
@@ -561,8 +586,8 @@ bool send_one(const NaviSnapshot &cur,
         disp.distanceValue     = static_cast<uint16_t>(draw);
         disp.distanceUnit      = cur.distance_unit ? cur.distance_unit
                                                    : static_cast<uint8_t>(1);
-        disp.displaySpeedLimit = splim;                                // [VN-PATCH] km/h
-        disp.displaySpeedUnit  = static_cast<uint8_t>(splim ? 2 : 0);  // [EU FIX] VBS enum 2=km/h (was 1=mph which mis-renders as ~80 for a 50 km/h sign on EU HUD)
+        disp.displaySpeedLimit = splim;
+        disp.displaySpeedUnit  = splim ? splim_unit : static_cast<uint8_t>(0);  // OEM unit (coop) or 2=km/h (legacy, see read_splim)
         disp.text_ID3          = sync_bit;
     }
 
@@ -653,6 +678,7 @@ bool sender_setup()
 // dispatcher never did (it was left polling a dead socket). No leak needed.
 void sender_teardown()
 {
+    hud_share::carplay_mark_inactive();   // let the OEM frames through again right away
     if (g_conn == nullptr) return;
 
     if (!g_hud_absent.load(std::memory_order_acquire)) {
@@ -724,16 +750,38 @@ void *sender_main(void *)
     NaviSnapshot prev = {};
     uint8_t      sync_bit = 0;
     uint32_t     last_processed = 0;
-    uint16_t     prev_splim = 0;
+    uint32_t     prev_key = 0;     // splim_key() of the last reading we acted on
     uint32_t     last_tick = 0;
+    const NaviSnapshot blankSnap = {};
+
+    // [UNIFIED] Cooperative mode (svcjcinavi merge shim present, SplimReading::coop):
+    //   * CarPlay route active  -> we own the HUD: paint maneuver + the OEM's own speed/unit,
+    //     re-assert ~2 Hz, and keep hud_share's CarPlay-active marker fresh so the merge shim
+    //     drops the OEM's blank-maneuver frames (no flicker).
+    //   * CarPlay route inactive -> send ONE blank-maneuver frame carrying the OEM speed, drop
+    //     the marker and go silent. The stock nav (and Android Auto through svcjcinavi) then
+    //     drive the HUD natively, speed sign included — we never repaint under them.
+    // Legacy mode (no merge shim) keeps the original behaviour below.
+    bool owned     = false;        // coop: our frames currently own the HUD
+    long last_mark = 0;            // coop: last time() the active marker was refreshed
+
+    hud_share::carplay_mark_inactive();   // marker left behind by a crashed previous instance
 
     // [NAV-END] Fresh bring-up: if no route is active, wipe any maneuver the cluster ECU
     // retained from a previous session / cold boot (we get no teardown across a power cycle
     // or a source switch). A live route (intra-process resume) leaves g_have_guidance set,
-    // so this skips and the snapshot paints normally.
+    // so this skips and the snapshot paints normally. In coop mode the OEM owns the speed
+    // sign, so only the maneuver is blanked and the OEM limit is repainted as-is.
     if (!g_have_guidance.load(std::memory_order_relaxed)) {
-        if (send_clear(sync_bit))
+        const SplimReading sp0 = read_splim();
+        if (sp0.coop) {
+            if (send_one(blankSnap, prev, sync_bit, sp0.limit, sp0.unit,
+                         /*splim_changed=*/true, /*force=*/true))
+                LOGD("hud sender: startup maneuver clear, OEM limit kept (coop)");
+            prev_key = splim_key(sp0);
+        } else if (send_clear(sync_bit)) {
             LOGD("hud sender: startup HUD clear (no active route)");
+        }
     }
 
     while (!g_stop.load(std::memory_order_relaxed)) {
@@ -751,46 +799,88 @@ void *sender_main(void *)
             if (s1 == s2) break;
         }
 
-        uint16_t splim = read_splim();
-        bool splim_changed = (splim != prev_splim);
+        const SplimReading sp = read_splim();
+        const uint32_t key = splim_key(sp);
+        const bool splim_changed = (key != prev_key);
+        const bool live = g_have_guidance.load(std::memory_order_relaxed);
         // [OVERSPEED] When carspeed_d flags over-speed, BLINK the limit glyph by
         // painting 0 on alternate 2Hz-ticker phases (~1Hz blink, steady regardless
         // of AA wake rate). Modulate ONLY the painted value: the TRUE splim still
-        // drives splim_changed + prev_splim below, so the blink never triggers a
+        // drives splim_changed + prev_key below, so the blink never triggers a
         // spurious Msg2/re-page, and turn/distance/street are untouched.
-        uint16_t painted = splim;
-        if (splim != 0 && read_over() &&
+        uint16_t painted = sp.limit;
+        if (sp.limit != 0 && read_over() &&
             (g_splim_tick.load(std::memory_order_relaxed) & 1u))
             painted = 0;
-        // [SPLIM NAV-END FIX 2026-06-18] At in-app nav-end (cp_tbt_entity_cb -> g_clear_req ->
-        // send_clear fires and clears g_have_guidance) the maneuver must turn OFF while the
-        // speed-limit sign STAYS. The phone keeps sending the limit, so splim_changed keeps
-        // re-firing this send; painting cur=snap would repaint the STALE g_snapshot maneuver and
-        // it would linger until the limit stops (wifi off) — the reported bug. Fix: when THIS mod
-        // has no live route, feed send_one a BLANK maneuver snapshot (kTurnIcons[0]={0,0,0} ->
-        // icon 0) instead of snap; the live limit still paints -> maneuver OFF, sign STAYS, and
-        // the keepalive below re-asserts that blank+limit frame via prev. SENDER-LOCAL: we do NOT
-        // write g_snapshot, so it stays single-writer (no writer-vs-writer race with the producer).
-        // GATED OUT of no_splim (read_splim()==0 -> splim_changed never re-fires here, so it was
-        // already correct) -> that build path is unchanged.
-#ifndef CARPLAY_NO_SPLIM
-        const NaviSnapshot blankSnap = {};
-        const NaviSnapshot &curSnap =
-            g_have_guidance.load(std::memory_order_relaxed) ? snap : blankSnap;
-#else
-        const NaviSnapshot &curSnap = snap;
-#endif
-        if (s2 != last_processed || splim_changed) {
-            send_one(curSnap, prev, sync_bit, painted, splim_changed, /*force=*/false);
-            prev = curSnap;
-            prev_splim = splim;
+
+        if (sp.coop) {
+            if (live) {
+                if (s2 != last_processed || splim_changed || !owned) {
+                    // !owned: first frame after (re)claiming the HUD -> force a full repaint.
+                    send_one(snap, prev, sync_bit, painted, sp.unit,
+                             splim_changed || !owned, /*force=*/!owned);
+                    prev = snap;
+                } else {
+                    // [KEEPALIVE] ticker wake, nothing changed -> re-assert (native ~2 Hz).
+                    send_one(prev, prev, sync_bit, painted, sp.unit, false, /*force=*/true);
+                }
+                if (!owned) LOGD("hud: CarPlay guidance -> CarPlay owns HUD (OEM frames muted)");
+                owned = true;
+                long now = static_cast<long>(std::time(nullptr));
+                if (now != last_mark) {
+                    hud_share::carplay_mark_active(static_cast<time_t>(now));
+                    last_mark = now;
+                }
+            } else if (owned) {
+                hud_share::carplay_mark_inactive();
+                last_mark = 0;
+                send_one(blankSnap, prev, sync_bit, sp.limit, sp.unit,
+                         /*splim_changed=*/true, /*force=*/true);
+                prev  = blankSnap;
+                owned = false;
+                LOGD("hud: CarPlay guidance off -> HUD handed back to OEM nav");
+            }
+            prev_key = key;
             last_processed = s2;
-        } else if (g_have_guidance.load(std::memory_order_relaxed) || prev_splim != 0) {
-            // [KEEPALIVE] Ticker woke us with no AA/splim change -> re-assert the
-            // last frame so the cluster ECU doesn't age out the maneuver OR the
-            // speed-limit (native re-asserts ~2Hz). Active when a route is live
-            // (g_have_guidance) OR a posted limit is present (prev_splim != 0).
-            send_one(prev, prev, sync_bit, painted, false, /*force=*/true);
+        } else {
+            if (owned) {   // merge shim vanished mid-session: drop the marker, fall back
+                hud_share::carplay_mark_inactive();
+                last_mark = 0;
+                owned = false;
+            }
+            // [UNIFIED] g_cp_session: once the CarPlay session is gone (or the native nav took
+            // TBT) we must not keep repainting a speed-only frame — that would blink under
+            // Android Auto or the stock nav. Re-armed by the next CarPlay maneuver.
+            const bool session = g_cp_session.load(std::memory_order_relaxed);
+            // [SPLIM NAV-END FIX 2026-06-18] At in-app nav-end (cp_tbt_entity_cb -> g_clear_req ->
+            // send_clear fires and clears g_have_guidance) the maneuver must turn OFF while the
+            // speed-limit sign STAYS. The phone keeps sending the limit, so splim_changed keeps
+            // re-firing this send; painting cur=snap would repaint the STALE g_snapshot maneuver and
+            // it would linger until the limit stops (wifi off) — the reported bug. Fix: when THIS mod
+            // has no live route, feed send_one a BLANK maneuver snapshot (kTurnIcons[0]={0,0,0} ->
+            // icon 0) instead of snap; the live limit still paints -> maneuver OFF, sign STAYS, and
+            // the keepalive below re-asserts that blank+limit frame via prev. SENDER-LOCAL: we do NOT
+            // write g_snapshot, so it stays single-writer (no writer-vs-writer race with the producer).
+            // GATED OUT of no_splim (read_splim()==0 -> splim_changed never re-fires here, so it was
+            // already correct) -> that build path is unchanged.
+#ifndef CARPLAY_NO_SPLIM
+            const NaviSnapshot &curSnap = live ? snap : blankSnap;
+#else
+            const NaviSnapshot &curSnap = snap;
+#endif
+            if (s2 != last_processed || splim_changed) {
+                if (live || session)
+                    send_one(curSnap, prev, sync_bit, painted, sp.unit, splim_changed, /*force=*/false);
+                prev = curSnap;
+                prev_key = key;
+                last_processed = s2;
+            } else if (live || (session && (prev_key & 0xFFFFu) != 0)) {
+                // [KEEPALIVE] Ticker woke us with no AA/splim change -> re-assert the
+                // last frame so the cluster ECU doesn't age out the maneuver OR the
+                // speed-limit (native re-asserts ~2Hz). Active when a route is live
+                // OR a posted limit is present during a live CarPlay session.
+                send_one(prev, prev, sync_bit, painted, sp.unit, false, /*force=*/true);
+            }
         }
 
         // [2026-06-13] The 6s STALE-ROUTE auto-clear stays REMOVED — it wiped the HUD whenever the
@@ -803,34 +893,57 @@ void *sender_main(void *)
         // fire on a mere stop (entity stays CARPLAY), so it is safe — unlike the staleness. The cb
         // (HMI worker thread) only sets the flag + wakes us; the wipe happens HERE on the sender
         // thread (no second writer to the seqlock snapshot).
-        // [NAV-END] Two distinct clear intents from the OEM CarPlay HMI cbs (devmgr_shim):
+        // [NAV-END] Clear intents from the OEM CarPlay HMI cbs (devmgr_shim):
         //   g_fullclear_req (cp_deactive_cb = session gone / phone UNPLUGGED) -> wipe EVERYTHING incl
         //     the speed-limit sign, like the AA mod's session-teardown clear.
         //   g_clear_req     (cp_tbt_entity_cb = TBT off but CarPlay STILL connected = in-app nav-end)
         //     -> blank ONLY the maneuver and KEEP the live sign (mirror AA hud_on_status(0): it memsets
-        //     only g_snapshot, never sends limit=0). No all-zero send_clear, no prev_splim reset -> the
+        //     only g_snapshot, never sends limit=0). No all-zero send_clear, no prev_key reset -> the
         //     keepalive sustains blank-maneuver+sign with NO flash. Falls back to full clear if no limit.
-        bool full_req = g_fullclear_req.exchange(false, std::memory_order_relaxed);
-        bool nav_req  = g_clear_req.exchange(false, std::memory_order_relaxed);
-        if (full_req) {
-            LOGD("hud: CarPlay session gone -> full HUD wipe (incl sign)");
-            if (send_clear(sync_bit)) {
+        //   g_yield_req     (entity = NATIVE: the stock nav took TBT) -> like g_clear_req, then quiet.
+        // In coop mode every one of them just hands the HUD back to the OEM (blank maneuver + OEM
+        // limit, once) — the OEM nav owns the sign, so it is never wiped.
+        bool full_req  = g_fullclear_req.exchange(false, std::memory_order_relaxed);
+        bool yield_req = g_yield_req.exchange(false, std::memory_order_relaxed);
+        bool nav_req   = g_clear_req.exchange(false, std::memory_order_relaxed);
+        if (full_req || yield_req)
+            g_cp_session.store(false, std::memory_order_relaxed);
+        if (sp.coop) {
+            if (full_req || yield_req || nav_req) {
+                LOGD("hud: CarPlay %s -> HUD handed back to OEM nav (coop)",
+                     full_req ? "session gone" : yield_req ? "TBT -> native" : "TBT off");
                 g_have_guidance.store(false, std::memory_order_relaxed);
-                prev       = {};
-                prev_splim = 0;
+                if (owned) {
+                    hud_share::carplay_mark_inactive();
+                    last_mark = 0;
+                    send_one(blankSnap, prev, sync_bit, sp.limit, sp.unit,
+                             /*splim_changed=*/true, /*force=*/true);
+                    owned = false;
+                }
+                prev = blankSnap;
                 last_processed = g_seq.load(std::memory_order_acquire);
                 nav_request_reset();
             }
-        } else if (nav_req) {
+        } else if (full_req) {
+            LOGD("hud: CarPlay session gone -> full HUD wipe (incl sign)");
+            if (send_clear(sync_bit)) {
+                g_have_guidance.store(false, std::memory_order_relaxed);
+                prev     = {};
+                prev_key = 0;
+                last_processed = g_seq.load(std::memory_order_acquire);
+                nav_request_reset();
+            }
+        } else if (nav_req || yield_req) {
             LOGD("hud: CarPlay TBT off (still connected) -> maneuver off, keep sign");
 #ifndef CARPLAY_NO_SPLIM
-            if (splim > 0) {
+            if (sp.limit > 0) {
                 // mirror AA: blank ONLY the maneuver, KEEP the live sign (reuse blankSnap above).
-                // Do NOT reset prev_splim -> the keepalive keeps painting the sign, no flash.
-                if (send_one(blankSnap, prev, sync_bit, splim, /*splim_changed=*/true, /*force=*/true)) {
+                // Do NOT reset prev_key -> the keepalive keeps painting the sign, no flash.
+                if (send_one(blankSnap, prev, sync_bit, sp.limit, sp.unit,
+                             /*splim_changed=*/true, /*force=*/true)) {
                     g_have_guidance.store(false, std::memory_order_relaxed);
-                    prev       = blankSnap;
-                    prev_splim = splim;
+                    prev     = blankSnap;
+                    prev_key = key;
                     last_processed = g_seq.load(std::memory_order_acquire);
                     nav_request_reset();
                 }
@@ -838,8 +951,8 @@ void *sender_main(void *)
 #endif
             if (send_clear(sync_bit)) {
                 g_have_guidance.store(false, std::memory_order_relaxed);
-                prev       = {};
-                prev_splim = 0;
+                prev     = {};
+                prev_key = 0;
                 last_processed = g_seq.load(std::memory_order_acquire);
                 nav_request_reset();   // [#3] so a re-started route re-emits even stationary/same-route
             }
@@ -944,6 +1057,14 @@ void hud_request_fullclear(void)
     g_cv.notify_one();
 }
 
+// [UNIFIED] The stock navigation took turn-by-turn (TurnByTurnEntity = NATIVE): hand the HUD back
+// and stop repainting until CarPlay sends a maneuver again. Same thread contract as above.
+void hud_request_yield(void)
+{
+    g_yield_req.store(true, std::memory_order_relaxed);
+    g_cv.notify_one();
+}
+
 // === Producer side (runs on the SDK callback thread) ==========
 
 void hud_on_status(uint32_t status)
@@ -992,6 +1113,7 @@ void hud_on_next_turn(const char *road_name,
     g_snapshot.turn_number = turn_number;
     seqlock_end();
     g_have_guidance.store(true, std::memory_order_relaxed);  // [KEEPALIVE] maneuver live
+    g_cp_session.store(true, std::memory_order_relaxed);     // [UNIFIED] CarPlay is driving again
     g_last_nav.store((long)std::time(nullptr), std::memory_order_relaxed);  // [NAV-END]
 }
 

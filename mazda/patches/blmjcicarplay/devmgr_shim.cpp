@@ -142,6 +142,7 @@ void cp_tbt_entity_cb(void *conn, void *p_entity, void *p_aux, void *userdata)
         // doing TBT, so wipe our HUD. Verified live: turning nav off fires entity 1->0. The 6s
         // staleness timer stays as a backstop for any unit where this subscribe didn't come up.
         if (e != 1) hud_request_clear();
+        if (e == 2) hud_request_yield();   // [UNIFIED] NATIVE owns TBT now: don't repaint under it
     } catch (...) { LOGE("cp_tbt_entity_cb exception swallowed (OEM dbus thread)"); }
 }
 

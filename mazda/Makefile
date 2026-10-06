@@ -26,7 +26,7 @@ CXX         := $(M3TOOLCHAIN)/bin/$(TRIPLE)-g++
 SYSROOT     := $(M3TOOLCHAIN)/$(TRIPLE)/sysroot
 
 # OEM libraries we patch. Order doesn't matter.
-PATCHES := blmjciaapa svcjcinavi aap_service
+PATCHES := blmjciaapa svcjcinavi aap_service blmjcicarplay
 
 # pkg-config wrapper pointed at the device's sysroot so it resolves
 # against the cross-compiled .pc files (not the host's). Same pattern
@@ -109,6 +109,16 @@ BUILD_DIR   := build
 DEBUG_DIR   := $(BUILD_DIR)/debug
 RELEASE_DIR := $(BUILD_DIR)/release
 
+# Per-patch compile flags (pattern-specific, so they reach only that patch's
+# objects in both configurations).
+#   blmjcicarplay: the speed limit now comes from the svcjcinavi merge shim
+#   (common/hud_share.h), so the legacy splim_udpd launcher stays compiled out.
+#   CARPLAY_VN_NORMALIZE folds Vietnamese 3-byte letters for the HUD font; it
+#   is a no-op for Latin/Cyrillic street names.
+CARPLAY_FLAGS := -DCARPLAY_NO_UDPD_LAUNCH -DCARPLAY_VN_NORMALIZE=1
+$(DEBUG_DIR)/blmjcicarplay/%.o:   PATCH_FLAGS := $(CARPLAY_FLAGS)
+$(RELEASE_DIR)/blmjcicarplay/%.o: PATCH_FLAGS := $(CARPLAY_FLAGS)
+
 # Per-patch derived names: build/<cfg>/libpatch-<name>.so
 DEBUG_LIBS   := $(addprefix $(DEBUG_DIR)/libpatch-,$(addsuffix .so,$(PATCHES)))
 RELEASE_LIBS := $(addprefix $(RELEASE_DIR)/libpatch-,$(addsuffix .so,$(PATCHES)))
@@ -130,11 +140,11 @@ $(addsuffix -debug,$(PATCHES)): %-debug: $(DEBUG_DIR)/libpatch-%.so
 #   build/release/<patch>/foo.o  <-  patches/<patch>/foo.cpp
 $(DEBUG_DIR)/%.o: patches/%.cpp
 	@mkdir -p $(@D)
-	$(CXX) -MD $(DEBUG_CXXFLAGS) -c $< -o $@
+	$(CXX) -MD $(DEBUG_CXXFLAGS) $(PATCH_FLAGS) -c $< -o $@
 
 $(RELEASE_DIR)/%.o: patches/%.cpp
 	@mkdir -p $(@D)
-	$(CXX) -MD $(RELEASE_CXXFLAGS) -c $< -o $@
+	$(CXX) -MD $(RELEASE_CXXFLAGS) $(PATCH_FLAGS) -c $< -o $@
 
 # Per-patch link rules generated via $(eval). Sources are discovered
 # recursively (via `find`) at parse time, so subdivision of a patch

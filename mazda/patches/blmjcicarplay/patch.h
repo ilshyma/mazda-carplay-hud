@@ -103,6 +103,9 @@ void hud_request_clear(void);
 // [NAV-END] FULL wipe incl the speed-limit sign — for CarPlay session gone / phone unplugged
 // (cp_deactive_cb), like the AA mod's session-teardown clear. hud_request_clear() keeps the sign.
 void hud_request_fullclear(void);
+// [UNIFIED] the stock navigation took turn-by-turn (TurnByTurnEntity = NATIVE): hand the HUD back
+// and stay quiet until the next CarPlay maneuver.
+void hud_request_yield(void);
 
 // ---- self-gate (main.cpp) --------------------------------------------------
 // True when /proc/self/cmdline shows we are the jciCARPLAY launcher.

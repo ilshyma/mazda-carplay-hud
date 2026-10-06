@@ -71,6 +71,18 @@
 // If the card is out, NNG never runs, this process never exists, and
 // the library is simply never loaded. If AAP is not active, the OEM
 // frames pass through untouched (native behaviour).
+//
+// === CarPlay (direct-VBS projection) ==========================
+//
+// The CarPlay shim does not go through svcjcinavi — it writes the HUD
+// itself — so it cannot be spliced in-process. Instead (common/hud_share.h):
+//   * every OEM speed we see is published to a tmpfs file, which the
+//     CarPlay shim paints into its own frames (same values the OEM nav
+//     would send, unit included);
+//   * while CarPlay guidance owns the HUD (its active marker is fresh) we
+//     DROP the OEM maneuver frame and its street strip, so the blank-
+//     maneuver OEM frames cannot alternate with CarPlay's. The speed is
+//     still remembered/published before the drop.
 
 #define LOG_TAG "MERGE"
 #include "log.h"
@@ -78,6 +90,7 @@
 #include "../common/preload.h"
 #include "../common/string_safe.h"
 #include "../common/oem/vbs_navi_hud.h"
+#include "../common/hud_share.h"
 
 #include <dlfcn.h>
 #include <time.h>
@@ -167,7 +180,10 @@ time_t   g_aap_last   = 0;
 //   REPLACE — OEM-origin strip while AAP active: overwrite its street
 //             with the captured AAP street, pass.
 //   PASSTHROUGH — AAP idle (or the AAP blanking frame): pass untouched.
-enum StreetAction { STREET_PASSTHROUGH, STREET_CAPTURE, STREET_REPLACE };
+//   DROP    — OEM-origin strip while CarPlay owns the HUD: swallow it,
+//             like the maneuver frame it belongs to.
+enum StreetAction { STREET_PASSTHROUGH, STREET_CAPTURE, STREET_REPLACE,
+                    STREET_DROP };
 StreetAction g_street_action = STREET_PASSTHROUGH;
 
 // Captured AAP street name (from the AAP-origin Msg2). The real setter
@@ -184,6 +200,29 @@ char g_aap_street[128] = { 0 };
 // AAP-origin discriminator and must never appear on a forwarded frame.
 uint16_t g_oem_speed  = 0;
 uint8_t  g_oem_sunit  = 0;
+
+// Last speed written to hud_share::kOemSpeedFile, so we only rewrite the
+// file on a change (OEM frames repeat the same speed ~1 Hz on a route).
+bool     g_speed_published = false;
+uint16_t g_pub_speed       = 0;
+uint8_t  g_pub_sunit       = 0;
+
+void publish_speed_if_changed()
+{
+    if (g_speed_published && g_pub_speed == g_oem_speed &&
+        g_pub_sunit == g_oem_sunit) {
+        return;
+    }
+    if (hud_share::publish_oem_speed(g_oem_speed, g_oem_sunit)) {
+        g_speed_published = true;
+        g_pub_speed = g_oem_speed;
+        g_pub_sunit = g_oem_sunit;
+        LOGV("published OEM speed=%u unit=%u for CarPlay",
+             static_cast<unsigned>(g_oem_speed), static_cast<unsigned>(g_oem_sunit));
+    } else {
+        LOGW("could not write %s (errno=%d)", hud_share::kOemSpeedFile, errno);
+    }
+}
 
 void ensure_gate()
 {
@@ -231,6 +270,10 @@ void ensure_gate()
         // the extra refcount RTLD_NOLOAD took so we don't leak it.
         dlclose(h);
         LOGD("self-gate: enabled (svcjcinavi.so mapped)");
+        // Announce ourselves to the CarPlay shim right away ("no limit
+        // yet"), so it switches to cooperative mode before the first
+        // speed-carrying OEM frame arrives.
+        publish_speed_if_changed();
     } else {
         LOGW("self-gate: svcjcinavi.so not mapped in this pid — "
              "merge disabled, transparent passthrough");
@@ -322,6 +365,16 @@ int VBS_NAVI_SetHUDDisplayMsgReq(void *conn, VbsNaviHudDisplay *disp,
         // left as svcjcinavi computed it.
         g_oem_speed = disp->displaySpeedLimit;
         g_oem_sunit = disp->displaySpeedUnit;
+        publish_speed_if_changed();
+
+        if (hud_share::carplay_is_active(time(nullptr))) {
+            // CarPlay paints this speed in its own frames; forwarding the
+            // OEM's blank maneuver would only blink against them.
+            g_street_action = STREET_DROP;
+            LOGV("OEM frame: speed=0x%x unit=%u  dropped (CarPlay owns HUD)",
+                 static_cast<unsigned>(g_oem_speed), static_cast<unsigned>(g_oem_sunit));
+            return 0;
+        }
 
         if (aap_active()) {
             disp->nextManeuverInfo = g_aap_man;
@@ -385,6 +438,10 @@ int VBS_NAVI_TMC_SetHUD_Display_Msg2(void *conn, VbsNaviHudMsg2 *msg2,
     } else if (g_street_action == STREET_REPLACE) {
         msg2->guidancePointName = g_aap_street;
         LOGV("Msg2 replace: OEM strip -> AAP street \"%s\"", g_aap_street);
+    } else if (g_street_action == STREET_DROP) {
+        g_street_action = STREET_PASSTHROUGH;
+        LOGV("Msg2 drop: OEM strip (CarPlay owns HUD)");
+        return 0;
     }
 
     return g_real_msg2(conn, msg2, unused, cb, user);
