@@ -64,7 +64,7 @@ HUD_DIR       := ../mazda/patches/blmjciaapa/hud
 HOST_CXXFLAGS := -std=gnu++11 -O2 -Wall -Wextra -I$(HUD_DIR) -I../mazda/patches
 
 BUILD := build
-TOOLS := gsi_test lane_test nav16_test config_test
+TOOLS := gsi_test hud_setting lane_test nav16_test config_test
 BINS  := $(addprefix $(BUILD)/,$(TOOLS))
 
 .PHONY: all clean $(TOOLS)
