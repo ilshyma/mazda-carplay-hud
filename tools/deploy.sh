@@ -96,9 +96,9 @@ probe)
         shift; ssh_cmu "sh $PROBE start '$*'"
         ;;
     mark)
-        shift; ssh_cmu "sh $PROBE mark '$*'" ;;
+        shift; ssh_cmu "[ -f $PROBE ] && sh $PROBE mark '$*' || echo 'пробник не запущен: tools/deploy.sh probe start'" ;;
     status|stop|list|clean)
-        ssh_cmu "sh $PROBE $1" ;;
+        ssh_cmu "[ -f $PROBE ] && sh $PROBE $1 || echo 'пробник ещё ни разу не запускали на этом блоке: tools/deploy.sh probe start'" ;;
     *)
         sed -n '2,24p' "$0"; exit 1 ;;
     esac
