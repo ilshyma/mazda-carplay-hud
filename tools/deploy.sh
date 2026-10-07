@@ -110,7 +110,9 @@ sysdump)
     ssh_cmu 'cd / && tar czf - lib usr/lib/libstdc++* usr/lib/libdbus* usr/lib/libdevmgr* \
              usr/lib/libaap* jci/lib jci/aapa jci/carplay jci/navi jci/sm jci/version.ini \
              usr/bin/aap_service usr/bin/carplayd etc/aap_system_attributes*.xml \
-             etc/devmgr_config_master.xml 2>/dev/null' > "$out"
+             etc/devmgr_config_master.xml 2>/dev/null' > "$out.part" \
+        || { rm -f "$out.part"; echo "sysdump failed (SSH up? Mac on the car Wi-Fi?)"; exit 1; }
+    mv "$out.part" "$out"
     echo "saved $out ($(du -h "$out" | cut -f1))"
     ;;
 *)
