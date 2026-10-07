@@ -63,13 +63,22 @@ HUD_PKG=dist/hud-mod-debug tools/deploy.sh install
 tools/deploy.sh roads        # live: decoded maneuvers + road="..." per pick
 ```
 
+## Test drives
+
+See [probe.md](probe.md): the diag package plus `tools/deploy.sh probe …`
+records D-Bus traffic, raw phone navigation for both projections and the merge
+decisions for replay at home.
+
 ## Build
 
 ```sh
 git submodule update --init mazda/m3-toolchain   # or set M3TOOLCHAIN_DIR
 tools/docker-build.sh release                    # x86_64 container, any host
 tools/package.sh                                 # -> dist/hud-mod/ + dist/hud-mod.zip
-test/unified/run.sh                              # host test of the hand-off
+test/unified/run.sh                              # host test of the hand-off (SAN=thread|address, DIAG=1)
+test/unified/run_hud_share.sh                    # side-channel edge cases
+test/install/run.sh                              # installer scenarios on a CMU config dump
+test/probe/run.sh                                # drive recorder
 ```
 
 ## Install

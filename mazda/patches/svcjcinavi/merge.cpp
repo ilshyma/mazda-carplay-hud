@@ -91,6 +91,7 @@
 #include "../common/string_safe.h"
 #include "../common/oem/vbs_navi_hud.h"
 #include "../common/hud_share.h"
+#include "../common/nav_diag.h"
 
 #include <dlfcn.h>
 #include <time.h>
@@ -166,6 +167,12 @@ const char *g_cur_street = nullptr;
 
 // Which flows read g_cur_street: force_street_name (AAP frames) and
 // force_street_name_native (the stock nav's own route frames).
+#ifdef HUD_NAV_DIAG
+NAV_DIAG_SINK(g_diag, "merge");
+const char *g_diag_action = "";   // maneuver-frame decision, logged with its strip
+uint32_t    g_diag_man    = 0;
+#endif
+
 bool g_unblank_aap    = false;
 bool g_unblank_native = false;
 
@@ -384,6 +391,10 @@ int VBS_NAVI_SetHUDDisplayMsgReq(void *conn, VbsNaviHudDisplay *disp,
             // CarPlay paints this speed in its own frames; forwarding the
             // OEM's blank maneuver would only blink against them.
             g_street_action = STREET_DROP;
+            NAV_DIAG(nav_diag::text(&g_diag, "oem-dropped", "man=%u speed=%u unit=%u (CarPlay owns HUD)",
+                                    static_cast<unsigned>(disp->nextManeuverInfo),
+                                    static_cast<unsigned>(g_oem_speed),
+                                    static_cast<unsigned>(g_oem_sunit)));
             LOGV("OEM frame: speed=0x%x unit=%u  dropped (CarPlay owns HUD)",
                  static_cast<unsigned>(g_oem_speed), static_cast<unsigned>(g_oem_sunit));
             return 0;
@@ -414,6 +425,13 @@ int VBS_NAVI_SetHUDDisplayMsgReq(void *conn, VbsNaviHudDisplay *disp,
         }
     }
 
+#ifdef HUD_NAV_DIAG
+    g_diag_man    = disp->nextManeuverInfo;
+    g_diag_action = g_street_action == STREET_CAPTURE ? "aa-frame"
+                  : g_street_action == STREET_REPLACE ? "oem-spliced-aa"
+                  : g_street_action == STREET_UNBLANK ? "oem-native-unblank"
+                  : "pass";
+#endif
     return g_real_set(conn, disp, unused, cb, user);
 }
 
@@ -476,5 +494,9 @@ int VBS_NAVI_TMC_SetHUD_Display_Msg2(void *conn, VbsNaviHudMsg2 *msg2,
         return 0;
     }
 
+    NAV_DIAG(nav_diag::text(&g_diag, g_diag_action, "man=%u speed=%u unit=%u street=\"%.120s\"",
+                            static_cast<unsigned>(g_diag_man), static_cast<unsigned>(g_oem_speed),
+                            static_cast<unsigned>(g_oem_sunit),
+                            msg2->guidancePointName ? msg2->guidancePointName : "(null)"));
     return g_real_msg2(conn, msg2, unused, cb, user);
 }

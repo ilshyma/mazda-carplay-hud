@@ -24,6 +24,7 @@
 
 #include "patch.h"
 #include "oem/libjcidbus.h"
+#include "common/nav_diag.h"
 
 #include <dlfcn.h>
 #include <pthread.h>
@@ -35,6 +36,10 @@
 #include <sys/types.h>
 
 namespace {
+
+#ifdef HUD_NAV_DIAG
+NAV_DIAG_SINK(g_diag, "cp_nav");
+#endif
 
 typedef int (*pfn4)(void *, void *, void *, void *);
 
@@ -137,6 +142,7 @@ void cp_tbt_entity_cb(void *conn, void *p_entity, void *p_aux, void *userdata)
         unsigned e = p_entity ? *reinterpret_cast<const uint32_t *>(p_entity) : 0xffffffffu;
         LOGD("carplay TBT entity=%u (%s)",
              e, e == 1 ? "CARPLAY" : e == 2 ? "NATIVE" : e == 0 ? "NONE" : "?");
+        NAV_DIAG(nav_diag::text(&g_diag, "cp-tbt", "entity=%u", e));
         // entityType 1=CARPLAY (CarPlay owns turn-by-turn = nav active). Anything else — 0=NONE
         // (nav switched off) or 2=NATIVE (the OEM nav took the HUD) — means CarPlay is no longer
         // doing TBT, so wipe our HUD. Verified live: turning nav off fires entity 1->0. The 6s
@@ -152,6 +158,7 @@ void cp_deactive_cb(void *a0, void *a1, void *a2, void *a3)
 {
     (void)a0; (void)a1; (void)a2; (void)a3;
     LOGD("carplay SessionDeactive (session ended)");
+    NAV_DIAG(nav_diag::text(&g_diag, "cp-session", "deactive"));
     hud_request_fullclear();   // CarPlay session gone (e.g. phone unplugged) -> FULL wipe incl sign (like AA teardown)
 }
 
@@ -266,6 +273,18 @@ void msg_tap(int msqid, const void *msgp, long n)
     }
 #endif
     // Only big messages: maneuver=0x348, guidance=0x640. Skips chatty small msgs.
+#ifdef HUD_NAV_DIAG
+    // Maneuver (0x8059) / guidance (0x8058) in full for replay through nav.cpp;
+    // anything else only its first 64 bytes (type + header) to keep the size sane.
+    if (msgp && n >= 4) {
+        unsigned mt = (*static_cast<const uint32_t *>(msgp)) & 0xffff;
+        bool nav = (mt == 0x8059 || mt == 0x8058);
+        char tag[16];
+        snprintf(tag, sizeof(tag), "cp%04x", mt);
+        nav_diag::bytes(&g_diag, tag, msgp, nav ? static_cast<size_t>(n)
+                                                : static_cast<size_t>(n < 64 ? n : 64));
+    }
+#endif
     if (n < 0x300 || !msgp) return;
     // Decode maneuver -> HUD (passive read of the received buffer). The shipped
     // build does NO disk logging here: the BUILD-2b probe that appended every nav

@@ -29,6 +29,7 @@
 #include "hud_nav.h"    // compute_turn_icon() — AA turn fields -> Mazda HUD glyph
 #include "hud_lane.h"   // oem_lane_code_for_aa — AA lanes -> OEM lane codes
 #include "common/string_safe.h"
+#include "common/nav_diag.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -543,6 +544,26 @@ void dump_distance(const DistanceHdr *h)
          nav_distance_unit_name(h->display_distance_unit));
 }
 
+#ifdef HUD_NAV_DIAG
+NAV_DIAG_SINK(g_diag_aa15, "aa_nav");
+
+// 36-byte 0x500/0x501/0x502 header as received, plus the road name a 0x501
+// points at (the pointer itself is meaningless after the drive).
+void diag_aa15(const void *hdr36)
+{
+    char note[200] = { 0 };
+    if (*static_cast<const uint32_t *>(hdr36) == kTagNextTurn) {
+        const NextTurnHdr *t = static_cast<const NextTurnHdr *>(hdr36);
+        if (t->road_name) {
+            size_t n = t->road_name_len < sizeof(note) - 1 ? t->road_name_len : sizeof(note) - 1;
+            libpatch::copy_utf8_truncated(note, n + 1, t->road_name, n);
+        }
+    }
+    nav_diag::bytes(&g_diag_aa15, hud_nav16_rx_seen() ? "aa15-ignored" : "aa15",
+                    hdr36, 36, note);
+}
+#endif
+
 void our_nav_cb(void *user_ctx, void *hdr36)
 {
     (void)user_ctx;  // We don't set cb_list[18], so this is NULL.
@@ -551,6 +572,7 @@ void our_nav_cb(void *user_ctx, void *hdr36)
         LOGW("nav cb: NULL header — SDK contract violation, ignoring");
         return;
     }
+    NAV_DIAG(diag_aa15(hdr36));
 
     // Single-writer guard + 1.5 fallback: drop the legacy 0x500/0x501/0x502
     // callbacks only once 1.6 frames are actually arriving on the rx socket —

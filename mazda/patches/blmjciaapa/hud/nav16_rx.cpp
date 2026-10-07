@@ -24,6 +24,7 @@
 #include "hud_nav16.h"
 #include "common/aa_nav16_msg.h"
 #include "common/thread_util.h"
+#include "common/nav_diag.h"
 
 #include <atomic>
 #include <cstring>
@@ -65,6 +66,10 @@ int open_rx_socket()
     }
     return fd;
 }
+
+#ifdef HUD_NAV_DIAG
+NAV_DIAG_SINK(g_diag, "aa_nav");
+#endif
 
 void *rx_main(void *)
 {
@@ -114,6 +119,8 @@ void *rx_main(void *)
         if (!g_seen.exchange(true, std::memory_order_release)) {
             LOGD("nav16_rx: first 1.6 frame received — 1.5 callback path now suppressed");
         }
+        NAV_DIAG(nav_diag::bytes(&g_diag, "aa16", buf + sizeof(AaNav16Hdr),
+                                 static_cast<size_t>(len)));
         hud_nav16_feed(reinterpret_cast<const uint8_t *>(buf) + sizeof(AaNav16Hdr),
                        len);
     }

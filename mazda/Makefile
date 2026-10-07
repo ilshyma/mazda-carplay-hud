@@ -105,7 +105,9 @@ RELEASE_CXXFLAGS := $(COMMON_CXXFLAGS) -O3 -DNDEBUG \
 RELEASE_LDFLAGS  := $(COMMON_LDFLAGS) -O3 -flto \
                     -Wl,--gc-sections -Wl,-s
 
-BUILD_DIR   := build
+# Overridable so the probe's diag build lands beside, not over, the ship build:
+#   make BUILD_DIR=build-diag EXTRA_CXXFLAGS='-DHUD_NAV_DIAG -DLOG_LEVEL=1' release
+BUILD_DIR   ?= build
 DEBUG_DIR   := $(BUILD_DIR)/debug
 RELEASE_DIR := $(BUILD_DIR)/release
 
