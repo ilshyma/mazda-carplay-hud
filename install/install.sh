@@ -71,13 +71,42 @@ else
 fi
 log "active sm config: $CONF (get_board_type.sh=${BT:-n/a})"
 
+# Strip every libpatch LD_PRELOAD (ours, KidMixer's cp-hud-mod, older oem-aa-mod
+# paths) plus KidMixer's LD_LIBRARY_PATH from both configs, then insert one
+# fresh set right after each target <service ...> line in the active config.
+strip_conf() {  # $1 in, $2 out
+  grep -v 'env_name="LD_PRELOAD"[^>]*libpatch-' "$1" \
+    | grep -v 'env_name="LD_LIBRARY_PATH" env_value="/jci/lib:/usr/lib"' > "$2"
+}
+env_line() {  # $1 name, $2 value
+  printf '            <environ_var env_name="%s" env_value="%s"/>\n' "$1" "$2"
+}
+
+# Preflight the active config BEFORE touching anything: all four target
+# services present, and none carries an LD_PRELOAD that is not ours (two
+# LD_PRELOAD environ_vars in one service would leave it to sm which one wins).
+check_conf() {  # $1 = sm config
+  strip_conf "$1" /tmp/hudmod.chk || return 1
+  awk '
+    BEGIN { n = split("jciCARPLAY jciAAPA jcinavi aap_service", a); for (i = 1; i <= n; i++) T[a[i]] = 1 }
+    /<service / { svc = ""; for (t in T) if (index($0, "name=\"" t "\"")) { svc = t; seen[t] = 1 } }
+    svc != "" && /env_name="LD_PRELOAD"/ { print "  foreign LD_PRELOAD in " svc ": " $0; bad = 1 }
+    /<\/service>/ { svc = "" }
+    END { for (t in T) if (!(t in seen)) { print "  service " t " not found"; bad = 1 }; exit bad }
+  ' /tmp/hudmod.chk
+  r=$?; rm -f /tmp/hudmod.chk; return $r
+}
+check_conf "$CONF" || die "$CONF is not as expected (see above) — nothing changed"
+
 mount -o remount,rw / 2>/dev/null || die "remount rw failed"
 mkdir -p "$MOD_DIR" "$BAK_DIR" || die "mkdir failed"
 
-backup_once() {  # $1 = file
+backup_once() {  # $1 = file, $2 = optional older pristine copy to back up instead
   [ -f "$1" ] || return 0
   b="$BAK_DIR/$(basename "$1").orig"
-  [ -f "$b" ] || { cp -a "$1" "$b" && log "backup $1 -> $b"; }
+  src=$1
+  [ -n "${2:-}" ] && [ -f "$2" ] && src=$2
+  [ -f "$b" ] || { cp -a "$src" "$b" && log "backup $src -> $b"; }
 }
 
 # --- 1) files ------------------------------------------------------------------
@@ -98,17 +127,6 @@ fi
 log "installed shims + libpatch.conf in $MOD_DIR"
 
 # --- 2) sm config --------------------------------------------------------------
-# Strip every libpatch LD_PRELOAD (ours, KidMixer's cp-hud-mod, older oem-aa-mod
-# paths) plus KidMixer's LD_LIBRARY_PATH from both configs, then insert one
-# fresh set right after each target <service ...> line in the active config.
-strip_conf() {  # $1 in, $2 out
-  grep -v 'env_name="LD_PRELOAD"[^>]*libpatch-' "$1" \
-    | grep -v 'env_name="LD_LIBRARY_PATH" env_value="/jci/lib:/usr/lib"' > "$2"
-}
-env_line() {  # $1 name, $2 value
-  printf '            <environ_var env_name="%s" env_value="%s"/>\n' "$1" "$2"
-}
-
 for C in "$CONF" "$OTHER"; do
   [ -f "$C" ] || continue
   backup_once "$C"
@@ -155,7 +173,7 @@ for x in aap_system_attributes.xml aap_system_attributes_UCP.xml; do
     log "WARNING: $x references files this unit lacks:$missing — left stock (fine if the other XML installed; if neither did, AA sends no HUD guidance)"
     continue
   fi
-  backup_once "/etc/$x"
+  backup_once "/etc/$x" "/etc/$x.orig"   # .orig = stock, if oem-aa-mod was installed by hand
   cp -f "$SRC/$x" "/etc/$x" && log "installed /etc/$x"
 done
 

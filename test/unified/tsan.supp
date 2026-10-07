@@ -1,0 +1,8 @@
+# CarPlay maneuver snapshot (hud_send.cpp g_snapshot) is a seqlock: the
+# hud_on_* producers write it between two g_seq increments and sender_main
+# copies it without a lock, retrying when g_seq is odd or changed. TSan cannot
+# model that, so the producers' plain writes are reported as races. Only
+# these writer functions are suppressed; any other race still reports.
+race:hud_on_next_turn
+race:hud_on_distance
+race:hud_on_status

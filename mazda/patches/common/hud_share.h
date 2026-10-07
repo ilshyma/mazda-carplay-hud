@@ -93,6 +93,32 @@ inline bool read_small_file(const char *path, char *buf, size_t cap)
     return true;
 }
 
+// Strict unsigned decimal: optional leading blanks, digits only (no sign),
+// rejected as soon as it exceeds max. Advances p past the number.
+inline bool parse_uint(const char *&p, unsigned long max, unsigned long *out)
+{
+    while (*p == ' ' || *p == '\t') ++p;
+    if (*p < '0' || *p > '9') {
+        return false;
+    }
+    unsigned long v = 0;
+    while (*p >= '0' && *p <= '9') {
+        v = v * 10 + static_cast<unsigned long>(*p - '0');
+        if (v > max) {
+            return false;
+        }
+        ++p;
+    }
+    *out = v;
+    return true;
+}
+
+inline bool only_blanks(const char *p)
+{
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') ++p;
+    return *p == '\0';
+}
+
 // --- OEM speed (writer: svcjcinavi merge shim) ---------------------------
 
 inline bool publish_oem_speed(uint16_t limit, uint8_t unit)
@@ -112,8 +138,10 @@ inline bool read_oem_speed(uint16_t *limit, uint8_t *unit)
     if (!read_small_file(kOemSpeedFile, buf, sizeof(buf))) {
         return false;
     }
-    unsigned l = 0, u = 0;
-    if (sscanf(buf, "%u %u", &l, &u) != 2 || l > 0xFFFFu || u > 0xFFu) {
+    const char *p = buf;
+    unsigned long l = 0, u = 0;
+    if (!parse_uint(p, 0xFFFFu, &l) || (*p != ' ' && *p != '\t') ||
+        !parse_uint(p, 0xFFu, &u) || !only_blanks(p)) {
         return false;
     }
     *limit = static_cast<uint16_t>(l);
@@ -141,7 +169,12 @@ inline bool carplay_is_active(time_t now)
     if (!read_small_file(kCarplayActiveFile, buf, sizeof(buf))) {
         return false;
     }
-    long ts = strtol(buf, nullptr, 10);
+    const char *p = buf;
+    unsigned long uts = 0;
+    if (!parse_uint(p, 0x7FFFFFFFul, &uts) || !only_blanks(p)) {   // 32-bit time_t on the CMU
+        return false;
+    }
+    long ts = static_cast<long>(uts);
     // A future ts can only come from a clock step (GPS time fix after a
     // 1970 boot); treat it as stale rather than latching OEM frames off.
     return ts <= static_cast<long>(now) + 2 &&

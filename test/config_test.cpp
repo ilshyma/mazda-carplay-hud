@@ -210,6 +210,19 @@ int main()
             CHECK(s.hud_fold_latin, "hud_fold_latin=true");
         }
 
+        // street un-blank keys are independent (force_street_name is AA-only,
+        // force_street_name_native is the stock nav's own route frames)
+        {
+            libpatch_config::Settings s;
+            CHECK(!s.force_street_name && !s.force_street_name_native, "street keys default false");
+            libpatch_config::apply_kv("force_street_name_native", "true", &s);
+            CHECK(s.force_street_name_native, "force_street_name_native=true");
+            CHECK(!s.force_street_name, "force_street_name untouched by the _native key");
+            libpatch_config::apply_kv("force_street_name", "yes", &s);
+            libpatch_config::apply_kv("FORCE_STREET_NAME_NATIVE", "off", &s);
+            CHECK(s.force_street_name && !s.force_street_name_native, "both keys set independently");
+        }
+
         // key names are case-insensitive
         {
             libpatch_config::Settings s;
