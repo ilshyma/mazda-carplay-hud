@@ -49,7 +49,7 @@ pack() {
   d=$1
   [ -d "$d" ] || return 0
   tar czf "$d.tar.gz" -C "$ROOT" "$(basename "$d")" 2>/dev/null && rm -rf "$d" \
-    && say "packed $d.tar.gz ($(du -k "$d.tar.gz" | cut -f1) KB)"
+    && sync && say "packed $d.tar.gz ($(wc -c < "$d.tar.gz") bytes)"   # du shows 0 on flash before writeback
 }
 
 # Move the diag shims' live files into session dir $1, then drop live/ so the
