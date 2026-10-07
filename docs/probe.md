@@ -10,7 +10,7 @@ diag package, which adds the raw capture to the ship code.
 tools/docker-build.sh BUILD_DIR=build-diag EXTRA_CXXFLAGS='-DHUD_NAV_DIAG -DLOG_LEVEL=1' release
 tools/package.sh diag
 HUD_PKG=dist/hud-mod-diag tools/deploy.sh install      # reboot, then SSH again
-tools/deploy.sh sysdump                                # once: CMU libs for QEMU tests
+tools/deploy.sh sysdump                                # once: CMU libs for QEMU tests (progress, resumable)
 tools/deploy.sh status                                 # 4 shims loaded?
 tools/deploy.sh probe start "drive 1"
 ```
