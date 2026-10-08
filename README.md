@@ -1,5 +1,22 @@
 # oem-aa-mod
 
+> **This branch: one HUD patch for both CarPlay and Android Auto.**
+> [oem-aa-mod](https://github.com/VitaliyKurokhtin/oem-aa-mod) (Android
+> Auto) plus the CarPlay HUD shim from
+> [mazda-carplay-hud](https://github.com/ilshyma/mazda-carplay-hud),
+> installed together with one installer. Both phones take the
+> speed-limit sign from the stock navigation, via the svcjcinavi shim,
+> and the HUD does not flicker between projection and stock-nav frames.
+> Tested on a CX-9 2018 EU, CMU150 FW 74.00.324A:
+> - CarPlay: arrows, distance, speed limit.
+> - Android Auto (Google Maps, Waze): arrows, distance, speed limit.
+> - EU HUDs do not draw the street-name line. The CMU sends it and the
+>   HUD accepts the street display mode, but the text is not rendered.
+>
+> See [docs/unified.md](docs/unified.md) (design, build, install) and
+> [docs/probe.md](docs/probe.md) (recording a test drive).
+
+
 Custom `LD_PRELOAD` shims for the Mazda CMU (Connectivity Master Unit)
 infotainment system. Each shim targets one specific OEM `.so` (e.g.
 `blmjciaapa.so`) and is deployed into a single PID via `sm.conf`'s
